@@ -12,7 +12,8 @@ import (
 
 // ConstructNSUpdateScript constructs the nsupdate script based on the event.
 // It includes the server and zone directives.
-func ConstructNSUpdateScript(host string, port string, zone string, fqdn string, recordType string, value string, recordID int, event string, ttl int) string {
+// Includes created and last_updated timestamps in the TXT meta-record for "created" and "updated" events.
+func ConstructNSUpdateScript(host string, port string, zone string, fqdn string, recordType string, value string, recordID int, event string, ttl int, created string, lastUpdated string) string {
 	var script strings.Builder
 
 	// Specify the server
@@ -29,8 +30,8 @@ func ConstructNSUpdateScript(host string, port string, zone string, fqdn string,
 		}
 		// Add the A record
 		script.WriteString(fmt.Sprintf("update add %s %d IN %s %s\n", fqdn, ttl, recordType, value))
-		// Add the TXT meta-record
-		script.WriteString(fmt.Sprintf("update add %s %d IN TXT \"record_id: %d\"\n", fqdn, ttl, recordID))
+		// Add the TXT meta-record with record_id, created, and last_updated
+		script.WriteString(fmt.Sprintf("update add %s %d IN TXT \"record_id: %d, created: %s, last_updated: %s\"\n", fqdn, ttl, recordID, created, lastUpdated))
 	case "deleted":
 		// Remove the A record (specific value)
 		script.WriteString(fmt.Sprintf("update delete %s %s %s\n", fqdn, recordType, value))

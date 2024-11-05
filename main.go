@@ -46,8 +46,9 @@ func webhookHandler(w http.ResponseWriter, r *http.Request, config *Config, lock
 	// Read the request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		log.Printf("Error reading request body: %v\n", err)
+		log.Printf("Raw Payload: %s\n", string(body))
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
 	defer r.Body.Close()
@@ -55,15 +56,17 @@ func webhookHandler(w http.ResponseWriter, r *http.Request, config *Config, lock
 	// Parse the JSON payload
 	var payload WebhookPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
-		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 		log.Printf("Error parsing JSON: %v\n", err)
+		log.Printf("Raw Payload: %s\n", string(body))
+		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 		return
 	}
 
 	// Validate the payload
 	if err := payload.Validate(); err != nil {
-		http.Error(w, "Invalid payload data", http.StatusBadRequest)
 		log.Printf("Payload validation error: %v\n", err)
+		log.Printf("Raw Payload: %s\n", string(body))
+		http.Error(w, "Invalid payload data", http.StatusBadRequest)
 		return
 	}
 
@@ -71,30 +74,35 @@ func webhookHandler(w http.ResponseWriter, r *http.Request, config *Config, lock
 	eventType := strings.ToLower(payload.Event)
 	switch eventType {
 	case "created":
-		handleCreatedEvent(w, r, config, lockManager, &payload)
+		handleCreatedEvent(w, r, config, lockManager, &payload, body)
 	case "deleted":
-		handleDeletedEvent(w, r, config, lockManager, &payload)
+		handleDeletedEvent(w, r, config, lockManager, &payload, body)
 	case "updated":
-		handleUpdatedEvent(w, r, config, lockManager, &payload)
+		handleUpdatedEvent(w, r, config, lockManager, &payload, body)
 	default:
-		http.Error(w, "Unsupported event type", http.StatusBadRequest)
 		log.Printf("Unsupported event type: %s\n", payload.Event)
+		log.Printf("Raw Payload: %s\n", string(body))
+		http.Error(w, "Unsupported event type", http.StatusBadRequest)
 	}
 }
 
 // handleCreatedEvent processes "created" webhook events.
-func handleCreatedEvent(w http.ResponseWriter, r *http.Request, config *Config, lockManager *RecordLockManager, payload *WebhookPayload) {
+func handleCreatedEvent(w http.ResponseWriter, r *http.Request, config *Config, lockManager *RecordLockManager, payload *WebhookPayload, rawBody []byte) {
 	// Extract necessary data from the payload
 	fqdn := payload.Data.FQDN
 	recordType := payload.Data.Type
 	value := payload.Data.Value
-	recordID := payload.Data.ID // Changed from payload.NetboxDNSPluginRecordID to payload.Data.ID
+	recordID := payload.Data.ID
 
 	// Extract TTL, default to 300 if nil or <=0
 	ttl := 300
 	if payload.Data.TTL != nil && *payload.Data.TTL > 0 {
 		ttl = *payload.Data.TTL
 	}
+
+	// Extract created and last_updated timestamps
+	created := payload.Data.Created
+	lastUpdated := payload.Data.LastUpdated
 
 	// Construct the nsupdate script
 	script := ConstructNSUpdateScript(
@@ -107,6 +115,8 @@ func handleCreatedEvent(w http.ResponseWriter, r *http.Request, config *Config, 
 		recordID,
 		"created",
 		ttl,
+		created,
+		lastUpdated,
 	)
 
 	// Start a goroutine to handle the DNS update
@@ -119,6 +129,7 @@ func handleCreatedEvent(w http.ResponseWriter, r *http.Request, config *Config, 
 		err := ExecuteNSUpdate(script, config)
 		if err != nil {
 			log.Printf("Failed to execute nsupdate for %s: %v\n", fqdn, err)
+			log.Printf("Raw Payload: %s\n", string(rawBody))
 			return
 		}
 
@@ -133,12 +144,12 @@ func handleCreatedEvent(w http.ResponseWriter, r *http.Request, config *Config, 
 }
 
 // handleDeletedEvent processes "deleted" webhook events.
-func handleDeletedEvent(w http.ResponseWriter, r *http.Request, config *Config, lockManager *RecordLockManager, payload *WebhookPayload) {
+func handleDeletedEvent(w http.ResponseWriter, r *http.Request, config *Config, lockManager *RecordLockManager, payload *WebhookPayload, rawBody []byte) {
 	// Extract necessary data from the payload
 	fqdn := payload.Data.FQDN
 	recordType := payload.Data.Type
 	value := payload.Data.Value
-	recordID := payload.Data.ID // Changed from payload.NetboxDNSPluginRecordID to payload.Data.ID
+	recordID := payload.Data.ID
 
 	// Construct the nsupdate script
 	script := ConstructNSUpdateScript(
@@ -150,7 +161,9 @@ func handleDeletedEvent(w http.ResponseWriter, r *http.Request, config *Config, 
 		value,
 		recordID,
 		"deleted",
-		0, // TTL is irrelevant for deletion
+		0,  // TTL is irrelevant for deletion
+		"", // No created timestamp for deletion
+		"", // No last_updated timestamp for deletion
 	)
 
 	// Start a goroutine to handle the DNS update
@@ -163,6 +176,7 @@ func handleDeletedEvent(w http.ResponseWriter, r *http.Request, config *Config, 
 		err := ExecuteNSUpdate(script, config)
 		if err != nil {
 			log.Printf("Failed to execute nsupdate for %s: %v\n", fqdn, err)
+			log.Printf("Raw Payload: %s\n", string(rawBody))
 			return
 		}
 
@@ -177,15 +191,16 @@ func handleDeletedEvent(w http.ResponseWriter, r *http.Request, config *Config, 
 }
 
 // handleUpdatedEvent processes "updated" webhook events.
-func handleUpdatedEvent(w http.ResponseWriter, r *http.Request, config *Config, lockManager *RecordLockManager, payload *WebhookPayload) {
+func handleUpdatedEvent(w http.ResponseWriter, r *http.Request, config *Config, lockManager *RecordLockManager, payload *WebhookPayload, rawBody []byte) {
 	// Extract prechange and postchange data
 	preChange := payload.Snapshots.PreChange
 	postChange := payload.Snapshots.PostChange
 
 	// Ensure that the record IDs match (assuming both snapshots pertain to the same record)
 	if preChange.Name != postChange.Name || preChange.Type != postChange.Type || preChange.Zone != postChange.Zone {
-		http.Error(w, "Mismatch in prechange and postchange data", http.StatusBadRequest)
 		log.Printf("Mismatch in prechange and postchange data for record ID %d\n", payload.Data.ID)
+		log.Printf("Raw Payload: %s\n", string(rawBody))
+		http.Error(w, "Mismatch in prechange and postchange data", http.StatusBadRequest)
 		return
 	}
 
@@ -193,13 +208,17 @@ func handleUpdatedEvent(w http.ResponseWriter, r *http.Request, config *Config, 
 	recordType := postChange.Type
 	newValue := postChange.Value
 	oldValue := preChange.Value
-	recordID := payload.Data.ID // Changed from payload.NetboxDNSPluginRecordID to payload.Data.ID
+	recordID := payload.Data.ID
 
 	// Extract TTL, default to 300 if nil or <=0
 	ttl := 300
 	if postChange.TTL != nil && *postChange.TTL > 0 {
 		ttl = *postChange.TTL
 	}
+
+	// Extract created and last_updated timestamps from postChange
+	created := payload.Data.Created
+	lastUpdated := payload.Data.LastUpdated
 
 	// Construct the nsupdate scripts
 	// 1. Remove the old A record and its TXT record
@@ -212,7 +231,9 @@ func handleUpdatedEvent(w http.ResponseWriter, r *http.Request, config *Config, 
 		oldValue,
 		recordID,
 		"deleted",
-		0, // TTL is irrelevant for deletion
+		0,  // TTL is irrelevant for deletion
+		"", // No created timestamp for deletion
+		"", // No last_updated timestamp for deletion
 	)
 
 	// 2. Add the new A record and its TXT record
@@ -226,6 +247,8 @@ func handleUpdatedEvent(w http.ResponseWriter, r *http.Request, config *Config, 
 		recordID,
 		"created",
 		ttl,
+		created,
+		lastUpdated,
 	)
 
 	// Start a goroutine to handle the DNS updates
@@ -238,6 +261,7 @@ func handleUpdatedEvent(w http.ResponseWriter, r *http.Request, config *Config, 
 		err := ExecuteNSUpdate(removeScript, config)
 		if err != nil {
 			log.Printf("Failed to execute nsupdate for removal of %s: %v\n", fqdn, err)
+			log.Printf("Raw Payload: %s\n", string(rawBody))
 			return
 		}
 
@@ -245,6 +269,7 @@ func handleUpdatedEvent(w http.ResponseWriter, r *http.Request, config *Config, 
 		err = ExecuteNSUpdate(addScript, config)
 		if err != nil {
 			log.Printf("Failed to execute nsupdate for addition of %s: %v\n", fqdn, err)
+			log.Printf("Raw Payload: %s\n", string(rawBody))
 			return
 		}
 
