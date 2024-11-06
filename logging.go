@@ -3,8 +3,11 @@
 package main
 
 import (
-	"log"
+	"os"
 	"strings"
+
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
 )
 
 // Log levels
@@ -16,11 +19,12 @@ const (
 )
 
 var (
+	logger          log.Logger
 	currentLogLevel int
 )
 
-// Initialize log levels
-func initLogLevel(envLevel string, flagLevel string) {
+// Initialize log levels and logger
+func initLogger(config *Config, logLevelFlag string) {
 	levelMap := map[string]int{
 		"DEBUG": DEBUG,
 		"INFO":  INFO,
@@ -32,41 +36,60 @@ func initLogLevel(envLevel string, flagLevel string) {
 	currentLogLevel = INFO
 
 	// Check environment variable
-	if lvl, exists := levelMap[strings.ToUpper(envLevel)]; exists {
+	if lvl, exists := levelMap[strings.ToUpper(config.LogLevel)]; exists {
 		currentLogLevel = lvl
 	}
 
 	// Override with flag if provided
-	if flagLevel != "" {
-		if lvl, exists := levelMap[strings.ToUpper(flagLevel)]; exists {
+	if logLevelFlag != "" {
+		if lvl, exists := levelMap[strings.ToUpper(logLevelFlag)]; exists {
 			currentLogLevel = lvl
 		} else {
-			log.Printf("Unknown log level '%s', defaulting to INFO", flagLevel)
+			logError("Unknown log level '%s', defaulting to INFO", logLevelFlag)
 		}
 	}
+
+	// Initialize the logger based on the selected format
+	var logFormat string
+	if config.LogFormat != "" {
+		logFormat = config.LogFormat
+	} else {
+		logFormat = os.Getenv("LOG_FORMAT")
+	}
+
+	switch strings.ToLower(logFormat) {
+	case "json":
+		logger = log.NewJSONLogger(log.NewSyncWriter(os.Stdout))
+	default:
+		// Default to logfmt
+		logger = log.NewLogfmtLogger(log.NewSyncWriter(os.Stdout))
+	}
+
+	// Add timestamp to all log messages
+	logger = log.With(logger, "ts", log.DefaultTimestampUTC)
 }
 
 // Logging helper functions
-func logDebug(format string, v ...interface{}) {
+func logDebug(msg string, keyvals ...interface{}) {
 	if currentLogLevel <= DEBUG {
-		log.Printf("[DEBUG] "+format, v...)
+		_ = level.Debug(logger).Log(append([]interface{}{"msg", msg}, keyvals...)...)
 	}
 }
 
-func logInfo(format string, v ...interface{}) {
+func logInfo(msg string, keyvals ...interface{}) {
 	if currentLogLevel <= INFO {
-		log.Printf("[INFO] "+format, v...)
+		_ = level.Info(logger).Log(append([]interface{}{"msg", msg}, keyvals...)...)
 	}
 }
 
-func logWarn(format string, v ...interface{}) {
+func logWarn(msg string, keyvals ...interface{}) {
 	if currentLogLevel <= WARN {
-		log.Printf("[WARN] "+format, v...)
+		_ = level.Warn(logger).Log(append([]interface{}{"msg", msg}, keyvals...)...)
 	}
 }
 
-func logError(format string, v ...interface{}) {
+func logError(msg string, keyvals ...interface{}) {
 	if currentLogLevel <= ERROR {
-		log.Printf("[ERROR] "+format, v...)
+		_ = level.Error(logger).Log(append([]interface{}{"msg", msg}, keyvals...)...)
 	}
 }

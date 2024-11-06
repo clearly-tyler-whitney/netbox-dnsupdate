@@ -6,24 +6,37 @@ import (
 	"encoding/json"
 	"flag"
 	"io"
-	"log"
 	"net/http"
+	"os"
 	"strings"
+
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
 )
 
 func main() {
-	// Define command-line flag for log level
+	// Define command-line flags
 	logLevelFlag := flag.String("log-level", "", "Set the logging level (DEBUG, INFO, WARN, ERROR)")
+	logFormatFlag := flag.String("log-format", "", "Set the logging format (json, logfmt)")
 	flag.Parse()
 
 	// Load configuration
 	config, err := LoadConfig()
 	if err != nil {
-		log.Fatalf("[ERROR] Configuration error: %v", err)
+		// Use standard log for fatal errors during initialization
+		logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stdout))
+		logger = log.With(logger, "ts", log.DefaultTimestampUTC)
+		level.Error(logger).Log("msg", "Configuration error", "err", err)
+		os.Exit(1)
 	}
 
-	// Initialize log level
-	initLogLevel(config.LogLevel, *logLevelFlag)
+	// Override config with command-line flags if provided
+	if *logFormatFlag != "" {
+		config.LogFormat = *logFormatFlag
+	}
+
+	// Initialize logger
+	initLogger(config, *logLevelFlag)
 
 	// Initialize the RecordLockManager
 	lockManager := &RecordLockManager{}
@@ -37,9 +50,10 @@ func main() {
 	http.HandleFunc("/healthz", healthzHandler)
 	http.HandleFunc("/ready", readyHandler)
 
-	logInfo("Starting server on %s...", config.ListenAddress)
+	logInfo("Starting server", "address", config.ListenAddress)
 	if err := http.ListenAndServe(config.ListenAddress, nil); err != nil {
-		log.Fatalf("[ERROR] Server failed to start: %v", err)
+		logError("Server failed to start", "err", err)
+		os.Exit(1)
 	}
 }
 
@@ -53,7 +67,7 @@ func webhookHandler(w http.ResponseWriter, r *http.Request, config *Config, lock
 	// Read the request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		logError("Error reading request body: %v", err)
+		logError("Error reading request body", "err", err)
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
@@ -62,14 +76,14 @@ func webhookHandler(w http.ResponseWriter, r *http.Request, config *Config, lock
 	// Parse the JSON payload
 	var payload WebhookPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
-		logError("Error parsing JSON: %v", err)
+		logError("Error parsing JSON", "err", err)
 		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 		return
 	}
 
 	// Validate the payload
 	if err := payload.Validate(); err != nil {
-		logError("Payload validation error: %v", err)
+		logError("Payload validation error", "err", err)
 		http.Error(w, "Invalid payload data", http.StatusBadRequest)
 		return
 	}
@@ -84,7 +98,7 @@ func webhookHandler(w http.ResponseWriter, r *http.Request, config *Config, lock
 	case "updated":
 		handleUpdatedEvent(w, config, lockManager, &payload)
 	default:
-		logError("Unsupported event type: %s", payload.Event)
+		logError("Unsupported event type", "event", payload.Event)
 		http.Error(w, "Unsupported event type", http.StatusBadRequest)
 	}
 }
@@ -114,7 +128,7 @@ func handleCreatedEvent(w http.ResponseWriter, config *Config, lockManager *Reco
 		ttl,
 	)
 
-	logDebug("Outgoing nsupdate script for CREATED event:\n%s", script)
+	logDebug("Outgoing nsupdate script for CREATED event", "script", script)
 
 	// Start a goroutine to handle the DNS update
 	go func() {
@@ -125,13 +139,28 @@ func handleCreatedEvent(w http.ResponseWriter, config *Config, lockManager *Reco
 		// Execute nsupdate
 		err := ExecuteNSUpdate(script, config)
 		if err != nil {
-			logError("Failed to execute nsupdate for %s: %v", fqdn, err)
+			logError("Failed to execute nsupdate",
+				"fqdn", fqdn,
+				"err", err,
+				"event", "created",
+				"user", payload.Username,
+				"request_id", payload.RequestID,
+				"record_id", payload.Data.ID,
+			)
 			return
 		}
 
 		// Log success
-		logInfo("Successfully processed CREATED event for %s by user %s with request ID %s and record ID %d",
-			fqdn, payload.Username, payload.RequestID, payload.Data.ID)
+		logInfo("Processed DNS record",
+			"event", "created",
+			"fqdn", fqdn,
+			"record_type", recordType,
+			"value", value,
+			"ttl", ttl,
+			"user", payload.Username,
+			"request_id", payload.RequestID,
+			"record_id", payload.Data.ID,
+		)
 	}()
 
 	// Handle PTR records if needed
@@ -163,7 +192,7 @@ func handleDeletedEvent(w http.ResponseWriter, config *Config, lockManager *Reco
 		0, // TTL is irrelevant for deletion
 	)
 
-	logDebug("Outgoing nsupdate script for DELETED event:\n%s", script)
+	logDebug("Outgoing nsupdate script for DELETED event", "script", script)
 
 	// Start a goroutine to handle the DNS update
 	go func() {
@@ -174,13 +203,28 @@ func handleDeletedEvent(w http.ResponseWriter, config *Config, lockManager *Reco
 		// Execute nsupdate
 		err := ExecuteNSUpdate(script, config)
 		if err != nil {
-			logError("Failed to execute nsupdate for %s: %v", fqdn, err)
+			logError("Failed to execute nsupdate",
+				"fqdn", fqdn,
+				"err", err,
+				"event", "deleted",
+				"user", payload.Username,
+				"request_id", payload.RequestID,
+				"record_id", payload.Data.ID,
+			)
 			return
 		}
 
 		// Log success
-		logInfo("Successfully processed DELETED event for %s by user %s with request ID %s and record ID %d",
-			fqdn, payload.Username, payload.RequestID, payload.Data.ID)
+		logInfo("Processed DNS record",
+			"event", "deleted",
+			"fqdn", fqdn,
+			"record_type", recordType,
+			"value", value,
+			"ttl", 0,
+			"user", payload.Username,
+			"request_id", payload.RequestID,
+			"record_id", payload.Data.ID,
+		)
 	}()
 
 	// Handle PTR records if needed
@@ -197,7 +241,9 @@ func handleDeletedEvent(w http.ResponseWriter, config *Config, lockManager *Reco
 func handleUpdatedEvent(w http.ResponseWriter, config *Config, lockManager *RecordLockManager, payload *WebhookPayload) {
 	// Check if Snapshots or PostChange is missing
 	if payload.Snapshots == nil || payload.Snapshots.PostChange.FQDN == "" {
-		logError("Snapshots missing or incomplete in payload for record ID %d", payload.Data.ID)
+		logError("Snapshots missing or incomplete in payload",
+			"record_id", payload.Data.ID,
+		)
 		http.Error(w, "Snapshots missing in payload", http.StatusBadRequest)
 		return
 	}
@@ -234,7 +280,7 @@ func handleUpdatedEvent(w http.ResponseWriter, config *Config, lockManager *Reco
 		ttl,
 	)
 
-	logDebug("Outgoing nsupdate script for UPDATED event:\n%s", script)
+	logDebug("Outgoing nsupdate script for UPDATED event", "script", script)
 
 	// Start a goroutine to handle the DNS update
 	go func() {
@@ -245,13 +291,29 @@ func handleUpdatedEvent(w http.ResponseWriter, config *Config, lockManager *Reco
 		// Execute nsupdate
 		err := ExecuteNSUpdate(script, config)
 		if err != nil {
-			logError("Failed to execute nsupdate for %s: %v", fqdn, err)
+			logError("Failed to execute nsupdate",
+				"fqdn", fqdn,
+				"err", err,
+				"event", "updated",
+				"user", payload.Username,
+				"request_id", payload.RequestID,
+				"record_id", payload.Data.ID,
+			)
 			return
 		}
 
 		// Log success
-		logInfo("Successfully processed UPDATED event for %s by user %s with request ID %s and record ID %d",
-			fqdn, payload.Username, payload.RequestID, payload.Data.ID)
+		logInfo("Processed DNS record",
+			"event", "updated",
+			"fqdn", fqdn,
+			"record_type", recordType,
+			"old_value", oldValue,
+			"new_value", newValue,
+			"ttl", ttl,
+			"user", payload.Username,
+			"request_id", payload.RequestID,
+			"record_id", payload.Data.ID,
+		)
 	}()
 
 	// Convert snapshots to RecordData
@@ -361,16 +423,33 @@ func handlePTRUpdate(event string, preData *RecordData, postData *RecordData, co
 			}
 		}
 
-		logDebug("Outgoing nsupdate script for PTR %s event:\n%s", event, script)
+		logDebug("Outgoing nsupdate script for PTR event",
+			"event", event,
+			"script", script,
+		)
 
 		// Execute nsupdate
 		err := ExecuteNSUpdate(script, config)
 		if err != nil {
-			logError("Failed to execute nsupdate for PTR record: %v", err)
+			logError("Failed to execute nsupdate for PTR record",
+				"event", event,
+				"err", err,
+				"old_ip", oldIP,
+				"new_ip", newIP,
+				"old_ptr", oldPTRName,
+				"new_ptr", newPTRName,
+			)
 			return
 		}
 
-		logInfo("Successfully processed PTR %s event for IP %s", event, newIP)
+		logInfo("Processed PTR record",
+			"event", event,
+			"fqdn", postData.FQDN,
+			"old_ip", oldIP,
+			"new_ip", newIP,
+			"old_ptr", oldPTRName,
+			"new_ptr", newPTRName,
+		)
 	}()
 }
 

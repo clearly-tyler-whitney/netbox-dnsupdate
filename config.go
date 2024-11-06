@@ -13,6 +13,7 @@ type Config struct {
 	TSIGKeyFile       string // Path to the TSIG key file, e.g., "/etc/bind/keys/ddns-key.conf"
 	ListenAddress     string // e.g., ":8080"
 	LogLevel          string // e.g., "INFO"
+	LogFormat         string // e.g., "json" or "logfmt"
 }
 
 // LoadConfig reads configuration from environment variables.
@@ -22,6 +23,7 @@ func LoadConfig() (*Config, error) {
 		TSIGKeyFile:       os.Getenv("TSIG_KEY_FILE"),
 		ListenAddress:     getEnv("WEBHOOK_LISTEN_ADDRESS", ":8080"),
 		LogLevel:          getEnv("LOG_LEVEL", "INFO"),
+		LogFormat:         getEnv("LOG_FORMAT", "logfmt"), // Default to logfmt
 	}
 
 	if config.TSIGKeyFile == "" {
