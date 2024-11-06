@@ -15,6 +15,7 @@ type WebhookPayload struct {
 // RecordData represents the data of the DNS record in the webhook payload.
 type RecordData struct {
 	ID         int      `json:"id"`
+	Name       string   `json:"name"` // Added Name field
 	FQDN       string   `json:"fqdn"`
 	Type       string   `json:"type"`
 	Value      string   `json:"value"`
@@ -26,12 +27,13 @@ type RecordData struct {
 // Snapshot represents the state of a DNS record before or after a change.
 type Snapshot struct {
 	ID         int    `json:"id"`
+	Name       string `json:"name"` // Added Name field
 	FQDN       string `json:"fqdn"`
 	Type       string `json:"type"`
 	Value      string `json:"value"`
 	TTL        *int   `json:"ttl"`
 	DisablePTR bool   `json:"disable_ptr"`
-	Zone       int    `json:"zone"` // Changed from ZoneData to int
+	Zone       int    `json:"zone"` // Zone is an integer (ID)
 }
 
 // ZoneData represents DNS zone information.

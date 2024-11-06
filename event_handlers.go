@@ -13,6 +13,11 @@ func handleCreatedEvent(w http.ResponseWriter, config *Config, lockManager *Reco
 	recordType := strings.ToUpper(payload.Data.Type)
 	value := payload.Data.Value
 
+	// Adjust value if record type is CNAME
+	if recordType == "CNAME" {
+		value = adjustCNAMEValue(value, fqdn, payload.Data.Name)
+	}
+
 	// Extract TTL, default to 300 if nil or <=0
 	ttl := 300
 	if payload.Data.TTL != nil && *payload.Data.TTL > 0 {
@@ -92,6 +97,11 @@ func handleDeletedEvent(w http.ResponseWriter, config *Config, lockManager *Reco
 	fqdn := preChange.FQDN
 	recordType := strings.ToUpper(preChange.Type)
 	value := preChange.Value
+
+	// Adjust value if record type is CNAME
+	if recordType == "CNAME" {
+		value = adjustCNAMEValue(value, fqdn, preChange.Name)
+	}
 
 	// Construct the nsupdate script to delete the record
 	script := ConstructNSUpdateScript(
@@ -179,6 +189,15 @@ func handleUpdatedEvent(w http.ResponseWriter, config *Config, lockManager *Reco
 	oldValue := ""
 	if preChange != nil {
 		oldValue = preChange.Value
+	}
+
+	// Adjust values if record type is CNAME
+	if recordType == "CNAME" {
+		newValue = adjustCNAMEValue(newValue, fqdn, postChange.Name)
+		if oldValue != "" && preChange != nil {
+			oldFQDN := preChange.FQDN
+			oldValue = adjustCNAMEValue(oldValue, oldFQDN, preChange.Name)
+		}
 	}
 
 	// Construct the nsupdate script

@@ -67,6 +67,7 @@ func snapshotToRecordData(s *Snapshot) *RecordData {
 	}
 	return &RecordData{
 		ID:         s.ID,
+		Name:       s.Name,
 		FQDN:       s.FQDN,
 		Type:       s.Type,
 		Value:      s.Value,
@@ -85,4 +86,39 @@ func getFQDN(preData, postData *RecordData) string {
 		return preData.FQDN
 	}
 	return ""
+}
+
+// adjustCNAMEValue adjusts the value of a CNAME record to be fully qualified.
+// If the value does not end with a period, it appends the zone name to it.
+func adjustCNAMEValue(value, fqdn, recordName string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasSuffix(value, ".") {
+		return value
+	}
+	// Extract the zone name from the FQDN and record name
+	zoneName := getZoneNameFromFQDN(fqdn, recordName)
+	if zoneName != "" {
+		return value + "." + zoneName + "."
+	}
+	// If unable to extract zone name, return value as is
+	return value
+}
+
+// getZoneNameFromFQDN extracts the zone name from the FQDN and record name.
+func getZoneNameFromFQDN(fqdn, recordName string) string {
+	fqdn = strings.TrimSuffix(fqdn, ".")
+	recordName = strings.TrimSuffix(recordName, ".")
+
+	// If recordName is empty, zoneName is fqdn
+	if recordName == "" {
+		return fqdn
+	}
+
+	if strings.HasPrefix(fqdn, recordName+".") {
+		zoneName := strings.TrimPrefix(fqdn, recordName+".")
+		return zoneName
+	}
+
+	// If recordName not found, return fqdn
+	return fqdn
 }
