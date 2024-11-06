@@ -3,40 +3,61 @@
 package main
 
 import (
-	"fmt"
+	"encoding/json"
 	"os"
 )
 
-// Config holds the configuration parameters for the application.
+// Config represents the application configuration.
 type Config struct {
-	BindServerAddress string // e.g., "127.0.0.1:53"
-	TSIGKeyFile       string // Path to the TSIG key file, e.g., "/etc/bind/keys/ddns-key.conf"
-	ListenAddress     string // e.g., ":8080"
-	LogLevel          string // e.g., "INFO"
-	LogFormat         string // e.g., "json" or "logfmt"
+	ListenAddress     string `json:"listen_address"`
+	BindServerAddress string `json:"bind_server_address"`
+	TSIGKeyFile       string `json:"tsig_key_file"`
+	LogLevel          string `json:"log_level"`
+	LogFormat         string `json:"log_format"`
 }
 
-// LoadConfig reads configuration from environment variables.
+// LoadConfig loads the configuration from environment variables, a file, or defaults.
 func LoadConfig() (*Config, error) {
+	// Set default values
 	config := &Config{
-		BindServerAddress: getEnv("BIND_SERVER_ADDRESS", "127.0.0.1:53"),
-		TSIGKeyFile:       os.Getenv("TSIG_KEY_FILE"),
-		ListenAddress:     getEnv("WEBHOOK_LISTEN_ADDRESS", ":8080"),
-		LogLevel:          getEnv("LOG_LEVEL", "INFO"),
-		LogFormat:         getEnv("LOG_FORMAT", "logfmt"), // Default to logfmt
+		ListenAddress:     ":8080",
+		BindServerAddress: "127.0.0.1:53",
+		TSIGKeyFile:       "/etc/nsupdate.key",
+		LogLevel:          "info",
+		LogFormat:         "logfmt",
 	}
 
-	if config.TSIGKeyFile == "" {
-		return nil, fmt.Errorf("TSIG_KEY_FILE environment variable is required")
+	// Override defaults with environment variables if set
+	if val := os.Getenv("LISTEN_ADDRESS"); val != "" {
+		config.ListenAddress = val
+	}
+	if val := os.Getenv("BIND_SERVER_ADDRESS"); val != "" {
+		config.BindServerAddress = val
+	}
+	if val := os.Getenv("TSIG_KEY_FILE"); val != "" {
+		config.TSIGKeyFile = val
+	}
+	if val := os.Getenv("LOG_LEVEL"); val != "" {
+		config.LogLevel = val
+	}
+	if val := os.Getenv("LOG_FORMAT"); val != "" {
+		config.LogFormat = val
+	}
+
+	// Attempt to load configuration from file if it exists
+	configFile := "config.json"
+	if _, err := os.Stat(configFile); err == nil {
+		file, err := os.Open(configFile)
+		if err != nil {
+			return nil, err
+		}
+		defer file.Close()
+
+		decoder := json.NewDecoder(file)
+		if err := decoder.Decode(config); err != nil {
+			return nil, err
+		}
 	}
 
 	return config, nil
-}
-
-// getEnv retrieves environment variables or returns a default value.
-func getEnv(key string, defaultVal string) string {
-	if value, exists := os.LookupEnv(key); exists {
-		return value
-	}
-	return defaultVal
 }

@@ -55,13 +55,10 @@ func reverseDNSName(ip string) string {
 	}
 }
 
-// Optionally, remove determineReverseZone if not used
-/*
-func determineReverseZone(oldIP, newIP string) string {
-	// This function is no longer needed since we're skipping the zone declaration
-	return ""
+// isValidIP checks if the provided string is a valid IP address.
+func isValidIP(ip string) bool {
+	return net.ParseIP(ip) != nil
 }
-*/
 
 // snapshotToRecordData converts a *Snapshot to a *RecordData.
 func snapshotToRecordData(s *Snapshot) *RecordData {
@@ -69,17 +66,23 @@ func snapshotToRecordData(s *Snapshot) *RecordData {
 		return nil
 	}
 	return &RecordData{
+		ID:         s.ID,
 		FQDN:       s.FQDN,
+		Type:       s.Type,
 		Value:      s.Value,
+		TTL:        s.TTL,
 		DisablePTR: s.DisablePTR,
+		Zone:       ZoneData{ID: s.Zone},
 	}
 }
 
-// snapshotToRecordDataNonPointer converts a Snapshot to a *RecordData.
-func snapshotToRecordDataNonPointer(s Snapshot) *RecordData {
-	return &RecordData{
-		FQDN:       s.FQDN,
-		Value:      s.Value,
-		DisablePTR: s.DisablePTR,
+// getFQDN retrieves the FQDN from preData or postData.
+func getFQDN(preData, postData *RecordData) string {
+	if postData != nil {
+		return postData.FQDN
 	}
+	if preData != nil {
+		return preData.FQDN
+	}
+	return ""
 }

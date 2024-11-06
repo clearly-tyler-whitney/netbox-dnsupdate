@@ -11,14 +11,14 @@ import (
 )
 
 // ConstructNSUpdateScript constructs the nsupdate script based on the event.
-func ConstructNSUpdateScript(host, port, zone, fqdn, recordType, oldValue, newValue, event string, ttl int) string {
+// Removed the 'zone' parameter and the zone declaration.
+func ConstructNSUpdateScript(host, port, fqdn, recordType, oldValue, newValue, event string, ttl int) string {
 	var script strings.Builder
 
 	// Specify the server
 	script.WriteString(fmt.Sprintf("server %s %s\n", host, port))
 
-	// Specify the zone
-	script.WriteString(fmt.Sprintf("zone %s\n", zone))
+	// Skipping the zone declaration
 
 	switch event {
 	case "created":
@@ -32,7 +32,6 @@ func ConstructNSUpdateScript(host, port, zone, fqdn, recordType, oldValue, newVa
 		script.WriteString(fmt.Sprintf("update delete %s %s %s\n", fqdn, recordType, oldValue))
 		script.WriteString(fmt.Sprintf("update add %s %d IN %s %s\n", fqdn, ttl, recordType, newValue))
 	}
-
 	// Send the update
 	script.WriteString("send\n")
 
@@ -40,14 +39,14 @@ func ConstructNSUpdateScript(host, port, zone, fqdn, recordType, oldValue, newVa
 }
 
 // ConstructPTRUpdateScript constructs the nsupdate script for PTR records.
-// Modified to skip the zone declaration.
+// This function also skips the 'zone' declaration.
 func ConstructPTRUpdateScript(host, port, ptrName, fqdn, event string, ttl int) string {
 	var script strings.Builder
 
 	// Specify the server
 	script.WriteString(fmt.Sprintf("server %s %s\n", host, port))
 
-	// Skipping the zone declaration as per your request.
+	// Skipping the zone declaration
 
 	switch event {
 	case "created":
@@ -58,17 +57,15 @@ func ConstructPTRUpdateScript(host, port, ptrName, fqdn, event string, ttl int) 
 	case "deleted":
 		script.WriteString(fmt.Sprintf("update delete %s PTR %s\n", ptrName, fqdn))
 	}
-
 	// Send the update
 	script.WriteString("send\n")
 
 	return script.String()
 }
 
-// ExecuteNSUpdate executes the nsupdate command with the provided script using the TSIG key file.
+// ExecuteNSUpdate executes the nsupdate script.
 func ExecuteNSUpdate(script string, config *Config) error {
-	// Prepare the command with the -k flag pointing to the TSIG key file
-	cmd := exec.Command("nsupdate", "-v", "-k", config.TSIGKeyFile)
+	cmd := exec.Command("nsupdate", "-k", config.TSIGKeyFile)
 
 	// Provide the script via stdin
 	stdin, err := cmd.StdinPipe()
