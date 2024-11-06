@@ -6,22 +6,23 @@ import (
 	"sync"
 )
 
-// RecordLockManager manages locks for DNS records based on their FQDN.
+// RecordLockManager manages locks for DNS records based on their FQDN or PTR names.
 type RecordLockManager struct {
 	locks sync.Map // map[string]*sync.Mutex
 }
 
-// AcquireLock acquires a mutex for the given fqdn.
-func (rlm *RecordLockManager) AcquireLock(fqdn string) *sync.Mutex {
-	mutexInterface, _ := rlm.locks.LoadOrStore(fqdn, &sync.Mutex{})
+// AcquireLock acquires a mutex for the given key.
+func (rlm *RecordLockManager) AcquireLock(key string) {
+	mutexInterface, _ := rlm.locks.LoadOrStore(key, &sync.Mutex{})
 	mutex := mutexInterface.(*sync.Mutex)
 	mutex.Lock()
-	return mutex
 }
 
-// ReleaseLock releases the mutex for the given fqdn.
-func (rlm *RecordLockManager) ReleaseLock(fqdn string, mutex *sync.Mutex) {
-	mutex.Unlock()
-	// Optional: Clean up the mutex from the map to prevent memory leaks.
-	// Only do this if you are sure no other goroutines are waiting on it.
+// ReleaseLock releases the mutex for the given key.
+func (rlm *RecordLockManager) ReleaseLock(key string) {
+	// Retrieve the mutex without removing it to avoid race conditions
+	if mutexInterface, ok := rlm.locks.Load(key); ok {
+		mutex := mutexInterface.(*sync.Mutex)
+		mutex.Unlock()
+	}
 }

@@ -4,19 +4,26 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"strings"
 )
 
 func main() {
+	// Define command-line flag for log level
+	logLevelFlag := flag.String("log-level", "", "Set the logging level (DEBUG, INFO, WARN, ERROR)")
+	flag.Parse()
+
 	// Load configuration
 	config, err := LoadConfig()
 	if err != nil {
-		log.Fatalf("Configuration error: %v", err)
+		log.Fatalf("[ERROR] Configuration error: %v", err)
 	}
+
+	// Initialize log level
+	initLogLevel(config.LogLevel, *logLevelFlag)
 
 	// Initialize the RecordLockManager
 	lockManager := &RecordLockManager{}
@@ -30,9 +37,9 @@ func main() {
 	http.HandleFunc("/healthz", healthzHandler)
 	http.HandleFunc("/ready", readyHandler)
 
-	log.Printf("Starting server on %s...\n", config.ListenAddress)
+	logInfo("Starting server on %s...", config.ListenAddress)
 	if err := http.ListenAndServe(config.ListenAddress, nil); err != nil {
-		log.Fatalf("Server failed to start: %v", err)
+		log.Fatalf("[ERROR] Server failed to start: %v", err)
 	}
 }
 
@@ -46,8 +53,7 @@ func webhookHandler(w http.ResponseWriter, r *http.Request, config *Config, lock
 	// Read the request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Printf("Error reading request body: %v\n", err)
-		log.Printf("Raw Payload: %s\n", string(body))
+		logError("Error reading request body: %v", err)
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
@@ -56,16 +62,14 @@ func webhookHandler(w http.ResponseWriter, r *http.Request, config *Config, lock
 	// Parse the JSON payload
 	var payload WebhookPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
-		log.Printf("Error parsing JSON: %v\n", err)
-		log.Printf("Raw Payload: %s\n", string(body))
+		logError("Error parsing JSON: %v", err)
 		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 		return
 	}
 
 	// Validate the payload
 	if err := payload.Validate(); err != nil {
-		log.Printf("Payload validation error: %v\n", err)
-		log.Printf("Raw Payload: %s\n", string(body))
+		logError("Payload validation error: %v", err)
 		http.Error(w, "Invalid payload data", http.StatusBadRequest)
 		return
 	}
@@ -74,25 +78,22 @@ func webhookHandler(w http.ResponseWriter, r *http.Request, config *Config, lock
 	eventType := strings.ToLower(payload.Event)
 	switch eventType {
 	case "created":
-		handleCreatedEvent(w, r, config, lockManager, &payload, body)
+		handleCreatedEvent(w, config, lockManager, &payload)
 	case "deleted":
-		handleDeletedEvent(w, r, config, lockManager, &payload, body)
+		handleDeletedEvent(w, config, lockManager, &payload)
 	case "updated":
-		handleUpdatedEvent(w, r, config, lockManager, &payload, body)
+		handleUpdatedEvent(w, config, lockManager, &payload)
 	default:
-		log.Printf("Unsupported event type: %s\n", payload.Event)
-		log.Printf("Raw Payload: %s\n", string(body))
+		logError("Unsupported event type: %s", payload.Event)
 		http.Error(w, "Unsupported event type", http.StatusBadRequest)
 	}
 }
 
 // handleCreatedEvent processes "created" webhook events.
-func handleCreatedEvent(w http.ResponseWriter, r *http.Request, config *Config, lockManager *RecordLockManager, payload *WebhookPayload, rawBody []byte) {
-	// Extract necessary data from the payload
+func handleCreatedEvent(w http.ResponseWriter, config *Config, lockManager *RecordLockManager, payload *WebhookPayload) {
 	fqdn := payload.Data.FQDN
 	recordType := payload.Data.Type
 	value := payload.Data.Value
-	recordID := payload.Data.ID
 
 	// Extract TTL, default to 300 if nil or <=0
 	ttl := 300
@@ -100,43 +101,43 @@ func handleCreatedEvent(w http.ResponseWriter, r *http.Request, config *Config, 
 		ttl = *payload.Data.TTL
 	}
 
-	// Extract created and last_updated timestamps
-	created := payload.Data.Created
-	lastUpdated := payload.Data.LastUpdated
-
-	// Construct the nsupdate script
+	// Construct the nsupdate script to add the record
 	script := ConstructNSUpdateScript(
 		extractHost(config.BindServerAddress),
 		extractPort(config.BindServerAddress),
 		payload.Data.Zone.Name,
 		fqdn,
 		recordType,
-		value,
-		recordID,
+		"",    // No old value
+		value, // New value
 		"created",
 		ttl,
-		created,
-		lastUpdated,
 	)
+
+	logDebug("Outgoing nsupdate script for CREATED event:\n%s", script)
 
 	// Start a goroutine to handle the DNS update
 	go func() {
 		// Acquire lock for the FQDN
-		mutex := lockManager.AcquireLock(fqdn)
-		defer lockManager.ReleaseLock(fqdn, mutex)
+		lockManager.AcquireLock(fqdn)
+		defer lockManager.ReleaseLock(fqdn)
 
 		// Execute nsupdate
 		err := ExecuteNSUpdate(script, config)
 		if err != nil {
-			log.Printf("Failed to execute nsupdate for %s: %v\n", fqdn, err)
-			log.Printf("Raw Payload: %s\n", string(rawBody))
+			logError("Failed to execute nsupdate for %s: %v", fqdn, err)
 			return
 		}
 
 		// Log success
-		log.Printf("Successfully processed CREATED event for %s by user %s with request ID %s and record ID %d\n",
-			fqdn, payload.Username, payload.RequestID, recordID)
+		logInfo("Successfully processed CREATED event for %s by user %s with request ID %s and record ID %d",
+			fqdn, payload.Username, payload.RequestID, payload.Data.ID)
 	}()
+
+	// Handle PTR records if needed
+	if !payload.Data.DisablePTR {
+		handlePTRUpdate("created", nil, &payload.Data, config, lockManager)
+	}
 
 	// Respond immediately
 	w.WriteHeader(http.StatusOK)
@@ -144,12 +145,81 @@ func handleCreatedEvent(w http.ResponseWriter, r *http.Request, config *Config, 
 }
 
 // handleDeletedEvent processes "deleted" webhook events.
-func handleDeletedEvent(w http.ResponseWriter, r *http.Request, config *Config, lockManager *RecordLockManager, payload *WebhookPayload, rawBody []byte) {
-	// Extract necessary data from the payload
+func handleDeletedEvent(w http.ResponseWriter, config *Config, lockManager *RecordLockManager, payload *WebhookPayload) {
 	fqdn := payload.Data.FQDN
 	recordType := payload.Data.Type
 	value := payload.Data.Value
-	recordID := payload.Data.ID
+
+	// Construct the nsupdate script to delete the record
+	script := ConstructNSUpdateScript(
+		extractHost(config.BindServerAddress),
+		extractPort(config.BindServerAddress),
+		payload.Data.Zone.Name,
+		fqdn,
+		recordType,
+		value, // Old value
+		"",    // No new value
+		"deleted",
+		0, // TTL is irrelevant for deletion
+	)
+
+	logDebug("Outgoing nsupdate script for DELETED event:\n%s", script)
+
+	// Start a goroutine to handle the DNS update
+	go func() {
+		// Acquire lock for the FQDN
+		lockManager.AcquireLock(fqdn)
+		defer lockManager.ReleaseLock(fqdn)
+
+		// Execute nsupdate
+		err := ExecuteNSUpdate(script, config)
+		if err != nil {
+			logError("Failed to execute nsupdate for %s: %v", fqdn, err)
+			return
+		}
+
+		// Log success
+		logInfo("Successfully processed DELETED event for %s by user %s with request ID %s and record ID %d",
+			fqdn, payload.Username, payload.RequestID, payload.Data.ID)
+	}()
+
+	// Handle PTR records if needed
+	if !payload.Data.DisablePTR {
+		handlePTRUpdate("deleted", &payload.Data, nil, config, lockManager)
+	}
+
+	// Respond immediately
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Webhook received and is being processed"))
+}
+
+// handleUpdatedEvent processes "updated" webhook events.
+func handleUpdatedEvent(w http.ResponseWriter, config *Config, lockManager *RecordLockManager, payload *WebhookPayload) {
+	// Check if Snapshots or PostChange is missing
+	if payload.Snapshots == nil || payload.Snapshots.PostChange.FQDN == "" {
+		logError("Snapshots missing or incomplete in payload for record ID %d", payload.Data.ID)
+		http.Error(w, "Snapshots missing in payload", http.StatusBadRequest)
+		return
+	}
+
+	preChange := payload.Snapshots.PreChange
+	postChange := payload.Snapshots.PostChange
+
+	fqdn := postChange.FQDN
+	recordType := postChange.Type
+	newValue := postChange.Value
+
+	// Extract TTL, default to 300 if nil or <=0
+	ttl := 300
+	if postChange.TTL != nil && *postChange.TTL > 0 {
+		ttl = *postChange.TTL
+	}
+
+	// Determine old value
+	oldValue := ""
+	if preChange != nil {
+		oldValue = preChange.Value
+	}
 
 	// Construct the nsupdate script
 	script := ConstructNSUpdateScript(
@@ -158,149 +228,150 @@ func handleDeletedEvent(w http.ResponseWriter, r *http.Request, config *Config, 
 		payload.Data.Zone.Name,
 		fqdn,
 		recordType,
-		value,
-		recordID,
-		"deleted",
-		0,  // TTL is irrelevant for deletion
-		"", // No created timestamp for deletion
-		"", // No last_updated timestamp for deletion
+		oldValue,
+		newValue,
+		"updated",
+		ttl,
 	)
+
+	logDebug("Outgoing nsupdate script for UPDATED event:\n%s", script)
 
 	// Start a goroutine to handle the DNS update
 	go func() {
 		// Acquire lock for the FQDN
-		mutex := lockManager.AcquireLock(fqdn)
-		defer lockManager.ReleaseLock(fqdn, mutex)
+		lockManager.AcquireLock(fqdn)
+		defer lockManager.ReleaseLock(fqdn)
 
 		// Execute nsupdate
 		err := ExecuteNSUpdate(script, config)
 		if err != nil {
-			log.Printf("Failed to execute nsupdate for %s: %v\n", fqdn, err)
-			log.Printf("Raw Payload: %s\n", string(rawBody))
+			logError("Failed to execute nsupdate for %s: %v", fqdn, err)
 			return
 		}
 
 		// Log success
-		log.Printf("Successfully processed DELETED event for %s by user %s with request ID %s and record ID %d\n",
-			fqdn, payload.Username, payload.RequestID, recordID)
+		logInfo("Successfully processed UPDATED event for %s by user %s with request ID %s and record ID %d",
+			fqdn, payload.Username, payload.RequestID, payload.Data.ID)
 	}()
+
+	// Convert snapshots to RecordData
+	preData := snapshotToRecordData(preChange)
+	postData := &payload.Data
+
+	// Handle PTR records if needed
+	preDisablePTR := false
+	postDisablePTR := postData.DisablePTR
+
+	if preData != nil {
+		preDisablePTR = preData.DisablePTR
+	}
+
+	// Handle PTR updates accordingly
+	if preDisablePTR != postDisablePTR || !postDisablePTR {
+		handlePTRUpdate("updated", preData, postData, config, lockManager)
+	}
 
 	// Respond immediately
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Webhook received and is being processed"))
 }
 
-// handleUpdatedEvent processes "updated" webhook events.
-func handleUpdatedEvent(w http.ResponseWriter, r *http.Request, config *Config, lockManager *RecordLockManager, payload *WebhookPayload, rawBody []byte) {
-	// Extract prechange and postchange data
-	preChange := payload.Snapshots.PreChange
-	postChange := payload.Snapshots.PostChange
-
-	// Ensure that the record IDs match (assuming both snapshots pertain to the same record)
-	if preChange.Name != postChange.Name || preChange.Type != postChange.Type || preChange.Zone != postChange.Zone {
-		log.Printf("Mismatch in prechange and postchange data for record ID %d\n", payload.Data.ID)
-		log.Printf("Raw Payload: %s\n", string(rawBody))
-		http.Error(w, "Mismatch in prechange and postchange data", http.StatusBadRequest)
-		return
-	}
-
-	fqdn := postChange.FQDN
-	recordType := postChange.Type
-	newValue := postChange.Value
-	oldValue := preChange.Value
-	recordID := payload.Data.ID
-
-	// Extract TTL, default to 300 if nil or <=0
-	ttl := 300
-	if postChange.TTL != nil && *postChange.TTL > 0 {
-		ttl = *postChange.TTL
-	}
-
-	// Extract created and last_updated timestamps from postChange
-	created := payload.Data.Created
-	lastUpdated := payload.Data.LastUpdated
-
-	// Construct the nsupdate scripts
-	// 1. Remove the old A record and its TXT record
-	removeScript := ConstructNSUpdateScript(
-		extractHost(config.BindServerAddress),
-		extractPort(config.BindServerAddress),
-		payload.Data.Zone.Name,
-		fqdn,
-		recordType,
-		oldValue,
-		recordID,
-		"deleted",
-		0,  // TTL is irrelevant for deletion
-		"", // No created timestamp for deletion
-		"", // No last_updated timestamp for deletion
-	)
-
-	// 2. Add the new A record and its TXT record
-	addScript := ConstructNSUpdateScript(
-		extractHost(config.BindServerAddress),
-		extractPort(config.BindServerAddress),
-		payload.Data.Zone.Name,
-		fqdn,
-		recordType,
-		newValue,
-		recordID,
-		"created",
-		ttl,
-		created,
-		lastUpdated,
-	)
-
-	// Start a goroutine to handle the DNS updates
+// handlePTRUpdate manages PTR records based on the event.
+func handlePTRUpdate(event string, preData *RecordData, postData *RecordData, config *Config, lockManager *RecordLockManager) {
 	go func() {
-		// Acquire lock for the FQDN
-		mutex := lockManager.AcquireLock(fqdn)
-		defer lockManager.ReleaseLock(fqdn, mutex)
+		var oldIP, newIP string
 
-		// Execute nsupdate for removal
-		err := ExecuteNSUpdate(removeScript, config)
+		if preData != nil {
+			oldIP = preData.Value
+		}
+
+		if postData != nil {
+			newIP = postData.Value
+		}
+
+		// Determine the PTR record names
+		var oldPTRName, newPTRName string
+
+		if oldIP != "" {
+			oldPTRName = reverseDNSName(oldIP)
+		}
+
+		if newIP != "" {
+			newPTRName = reverseDNSName(newIP)
+		}
+
+		// Lock on the PTR names to prevent race conditions
+		if oldPTRName != "" {
+			lockManager.AcquireLock(oldPTRName)
+			defer lockManager.ReleaseLock(oldPTRName)
+		}
+
+		if newPTRName != "" && newPTRName != oldPTRName {
+			lockManager.AcquireLock(newPTRName)
+			defer lockManager.ReleaseLock(newPTRName)
+		}
+
+		// Construct nsupdate script based on the event
+		var script string
+
+		switch event {
+		case "created":
+			// Add PTR record
+			script = ConstructPTRUpdateScript(
+				extractHost(config.BindServerAddress),
+				extractPort(config.BindServerAddress),
+				newPTRName,
+				postData.FQDN,
+				"created",
+				300, // Default TTL or use postData.TTL if available
+			)
+		case "deleted":
+			// Delete PTR record
+			script = ConstructPTRUpdateScript(
+				extractHost(config.BindServerAddress),
+				extractPort(config.BindServerAddress),
+				oldPTRName,
+				preData.FQDN,
+				"deleted",
+				0,
+			)
+		case "updated":
+			// Delete old PTR and add new PTR
+			if oldPTRName != "" && preData != nil {
+				deleteScript := ConstructPTRUpdateScript(
+					extractHost(config.BindServerAddress),
+					extractPort(config.BindServerAddress),
+					oldPTRName,
+					preData.FQDN,
+					"deleted",
+					0,
+				)
+				script += deleteScript
+			}
+			if newPTRName != "" && postData != nil {
+				createScript := ConstructPTRUpdateScript(
+					extractHost(config.BindServerAddress),
+					extractPort(config.BindServerAddress),
+					newPTRName,
+					postData.FQDN,
+					"created",
+					300, // Default TTL or use postData.TTL if available
+				)
+				script += createScript
+			}
+		}
+
+		logDebug("Outgoing nsupdate script for PTR %s event:\n%s", event, script)
+
+		// Execute nsupdate
+		err := ExecuteNSUpdate(script, config)
 		if err != nil {
-			log.Printf("Failed to execute nsupdate for removal of %s: %v\n", fqdn, err)
-			log.Printf("Raw Payload: %s\n", string(rawBody))
+			logError("Failed to execute nsupdate for PTR record: %v", err)
 			return
 		}
 
-		// Execute nsupdate for addition
-		err = ExecuteNSUpdate(addScript, config)
-		if err != nil {
-			log.Printf("Failed to execute nsupdate for addition of %s: %v\n", fqdn, err)
-			log.Printf("Raw Payload: %s\n", string(rawBody))
-			return
-		}
-
-		// Log success
-		log.Printf("Successfully processed UPDATED event for %s by user %s with request ID %s and record ID %d\n",
-			fqdn, payload.Username, payload.RequestID, recordID)
+		logInfo("Successfully processed PTR %s event for IP %s", event, newIP)
 	}()
-
-	// Respond immediately
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Webhook received and is being processed"))
-}
-
-// extractHost extracts the host from the BindServerAddress
-func extractHost(address string) string {
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		// Assume no port specified, return the whole address
-		return address
-	}
-	return host
-}
-
-// extractPort extracts the port from the BindServerAddress or returns default "53"
-func extractPort(address string) string {
-	_, port, err := net.SplitHostPort(address)
-	if err != nil {
-		// Assume no port specified, return default "53"
-		return "53"
-	}
-	return port
 }
 
 // healthzHandler responds with "OK" for health checks.

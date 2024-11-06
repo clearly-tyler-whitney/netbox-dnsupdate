@@ -12,6 +12,7 @@ type Config struct {
 	BindServerAddress string // e.g., "127.0.0.1:53"
 	TSIGKeyFile       string // Path to the TSIG key file, e.g., "/etc/bind/keys/ddns-key.conf"
 	ListenAddress     string // e.g., ":8080"
+	LogLevel          string // e.g., "INFO"
 }
 
 // LoadConfig reads configuration from environment variables.
@@ -20,6 +21,7 @@ func LoadConfig() (*Config, error) {
 		BindServerAddress: getEnv("BIND_SERVER_ADDRESS", "127.0.0.1:53"),
 		TSIGKeyFile:       os.Getenv("TSIG_KEY_FILE"),
 		ListenAddress:     getEnv("WEBHOOK_LISTEN_ADDRESS", ":8080"),
+		LogLevel:          getEnv("LOG_LEVEL", "INFO"),
 	}
 
 	if config.TSIGKeyFile == "" {
